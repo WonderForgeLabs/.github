@@ -1,0 +1,141 @@
+# Push-delivery routing for the ADR-052 fleet coordination layer (org
+# Discussions -> Slack). Dumb routing only — no agent/LLM logic lives here;
+# that lives in the project-ops plugin's `fleet` skill and dynamic workflows.
+# `fleet.sh watch` (WonderForgeLabs/forge, project-ops plugin) is the polling
+# FALLBACK; this workflow is the PRIMARY delivery path.
+#
+# REVIEWED-NOT-TESTED: `discussion`/`discussion_comment` triggers cannot be
+# exercised by CI in forge or project-ops. Live verification evidence comes
+# from Task 8 of the fleet plan:
+# https://github.com/WonderForgeLabs/forge/blob/main/docs/superpowers/plans/2026-07-03-fleet-discussions-implementation.md
+name: Fleet Notify
+
+on: [discussion, discussion_comment]
+
+permissions:
+  contents: read
+  # Only used for the no-Slack-token HITL fallback comment (addDiscussionComment).
+  discussions: write
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      # Classify by category name + action from the event payload. Untrusted
+      # event content (title/body/logins) is passed through `env:` rather than
+      # interpolated directly into the `run:` script — GITHUB_OUTPUT/env vars
+      # are not re-parsed as shell, so this is safe against script injection
+      # even though discussion titles/bodies are attacker-controlled.
+      - name: Classify event
+        id: classify
+        env:
+          EVT: ${{ github.event_name }}
+          ACT: ${{ github.event.action }}
+          CATEGORY: ${{ github.event.discussion.category.name }}
+          COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
+          DISCUSSION_AUTHOR: ${{ github.event.discussion.user.login }}
+        run: |
+          set -euo pipefail
+          route="none"
+          if [[ "$EVT" == "discussion" && "$ACT" == "created" && "$CATEGORY" == "Agent HITL" ]]; then
+            route="hitl-created"
+          elif [[ "$EVT" == "discussion" && "$ACT" == "answered" && "$CATEGORY" == "Agent HITL" ]]; then
+            route="hitl-answered"
+          elif [[ "$EVT" == "discussion_comment" && "$ACT" == "created" && "$CATEGORY" == "Agent Sessions" && "$COMMENT_AUTHOR" != "$DISCUSSION_AUTHOR" ]]; then
+            route="wall-post"
+          elif [[ "$EVT" == "discussion" && "$ACT" == "created" && "$CATEGORY" == "Agent Announcements" ]]; then
+            route="announcement"
+          fi
+          echo "fleet-notify: event=$EVT action=$ACT category=${CATEGORY:-<none>} -> route=$route"
+          echo "route=$route" >> "$GITHUB_OUTPUT"
+
+      # Skipped entirely (no Slack call, no GH fallback, job still succeeds)
+      # when classify found nothing to route — "other categories/actions
+      # exit 0 silently" from the plan.
+      - name: Route to Slack (or GH mention fallback)
+        if: steps.classify.outputs.route != 'none'
+        env:
+          ROUTE: ${{ steps.classify.outputs.route }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          DISCUSSION_URL: ${{ github.event.discussion.html_url }}
+          DISCUSSION_TITLE: ${{ github.event.discussion.title }}
+          DISCUSSION_BODY: ${{ github.event.discussion.body }}
+          DISCUSSION_NODE_ID: ${{ github.event.discussion.node_id }}
+          ANSWER_URL: ${{ github.event.answer.html_url }}
+          COMMENT_URL: ${{ github.event.comment.html_url }}
+          COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
+        run: |
+          set -euo pipefail
+
+          # post_slack <channel> <text> — best-effort; echoes the raw Slack
+          # JSON response ("{}" on a transport-level failure) so callers can
+          # inspect .ok/.error without ever aborting the step. Channel is
+          # passed by NAME (Slack resolves "#name" for public channels via
+          # chat.postMessage). Builds the JSON payload via `jq -R` (encode
+          # each field to a JSON string, then splice with plain printf)
+          # rather than `jq --arg`'s `'{channel:$c}'` template — avoids
+          # embedding shell-looking `$name` tokens inside a single-quoted
+          # jq program entirely (no SC2016 to suppress).
+          post_slack() {
+            local channel="$1" text="$2"
+            local channel_json text_json payload
+            channel_json=$(printf '%s' "$channel" | jq -R .)
+            text_json=$(printf '%s' "$text" | jq -R .)
+            payload=$(printf '{"channel":%s,"text":%s}' "$channel_json" "$text_json")
+            curl -sS -X POST https://slack.com/api/chat.postMessage \
+              -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+              -H "Content-Type: application/json; charset=utf-8" \
+              -d "$payload" \
+              || echo '{}'
+          }
+
+          if [[ -z "${SLACK_BOT_TOKEN:-}" ]]; then
+            # Fallback only applies to the HITL-created case per the plan —
+            # every other route just logs and exits when the secret isn't
+            # provisioned yet (SLACK_BOT_TOKEN is not yet set on this repo).
+            if [[ "$ROUTE" == "hitl-created" ]]; then
+              echo "fleet-notify: SLACK_BOT_TOKEN not set — falling back to a GH mention comment"
+              body="@ElanHasson — new Agent HITL request needs a human answer (SLACK_BOT_TOKEN not configured yet, so this is a GitHub-only fallback notice): $DISCUSSION_TITLE — $DISCUSSION_URL"
+              gh api graphql -f query='
+                mutation($id:ID!,$body:String!){
+                  addDiscussionComment(input:{discussionId:$id, body:$body}){ comment{ id } }
+                }' -f id="$DISCUSSION_NODE_ID" -f body="$body" || true
+            else
+              echo "fleet-notify: SLACK_BOT_TOKEN not set — no fallback defined for route=$ROUTE, skipping"
+            fi
+            exit 0
+          fi
+
+          case "$ROUTE" in
+            hitl-created)
+              # Best-effort session-link extraction from the envelope's
+              # compact JSON `links` array (rel=session, set by fleet.sh
+              # hitl-ask when a session thread is registered). Tolerate
+              # absence — a plain grep -o miss is not an error here.
+              session_link=$(printf '%s' "$DISCUSSION_BODY" | grep -o '"rel":"session","href":"[^"]*"' | sed -E 's/.*"href":"([^"]*)".*/\1/' || true)
+              text=$(printf '🆘 New Agent HITL request: *%s*\n%s' "$DISCUSSION_TITLE" "$DISCUSSION_URL")
+              [[ -n "$session_link" ]] && text=$(printf '%s\nsession: %s' "$text" "$session_link")
+              post_slack "#agent-hitl" "$text" >/dev/null || true
+              ;;
+            hitl-answered)
+              text=$(printf '✅ Agent HITL answered: %s\nanswer: %s' "$DISCUSSION_URL" "${ANSWER_URL:-$DISCUSSION_URL}")
+              post_slack "#agent-hitl" "$text" >/dev/null || true
+              ;;
+            announcement)
+              text=$(printf '📢 *%s*\n%s' "$DISCUSSION_TITLE" "$DISCUSSION_URL")
+              post_slack "#agent-announcements" "$text" >/dev/null || true
+              ;;
+            wall-post)
+              # Thread titles ARE session ids — derive the target agent's
+              # Slack channel directly from the parent discussion's title.
+              sid="$DISCUSSION_TITLE"
+              text=$(printf '💬 wall post from %s on your session thread:\n%s' "$COMMENT_AUTHOR" "$COMMENT_URL")
+              resp=$(post_slack "agent-$sid" "$text")
+              err=$(jq -r '.error // empty' <<<"${resp:-{}}")
+              if [[ "$err" == "channel_not_found" || "$err" == "is_archived" ]]; then
+                echo "fleet-notify: agent-$sid unavailable ($err) — falling back to #agent-fleet"
+                post_slack "#agent-fleet" "(fallback: agent-$sid $err) $text" >/dev/null || true
+              fi
+              ;;
+          esac
