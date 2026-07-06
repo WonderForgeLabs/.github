@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "@context": {
+    "@vocab": "https://wonderforge.io/fleet#",
+    "sid": "https://wonderforge.io/fleet#sessionId",
+    "ts": { "@id": "https://wonderforge.io/fleet#timestamp", "@type": "http://www.w3.org/2001/XMLSchema#dateTime" },
+    "state": "https://wonderforge.io/fleet#state",
+    "topics": { "@id": "https://wonderforge.io/fleet#topic", "@container": "@set" },
+    "resource": { "@id": "https://wonderforge.io/fleet#resource", "@type": "@id" },
+    "links": { "@id": "https://wonderforge.io/fleet#link", "@container": "@set" },
+    "rel": "https://wonderforge.io/fleet#relation",
+    "href": { "@id": "https://wonderforge.io/fleet#target", "@type": "@id" },
+    "monitor": "https://wonderforge.io/fleet#monitor",
+    "AgentSessionProfile": "https://wonderforge.io/fleet#AgentSessionProfile",
+    "AgentJournalEntry": "https://wonderforge.io/fleet#AgentJournalEntry",
+    "AgentClaim": "https://wonderforge.io/fleet#AgentClaim",
+    "AgentHandoff": "https://wonderforge.io/fleet#AgentHandoff",
+    "AgentHitlRequest": "https://wonderforge.io/fleet#AgentHitlRequest",
+    "AgentAnnouncement": "https://wonderforge.io/fleet#AgentAnnouncement",
+    "AgentIdea": "https://wonderforge.io/fleet#AgentIdea",
+    "AgentWallReply": "https://wonderforge.io/fleet#AgentWallReply",
+    "ChannelConfig": "https://wonderforge.io/fleet#ChannelConfig"
+  }
+}
