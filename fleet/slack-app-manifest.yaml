@@ -1,0 +1,36 @@
+# Slack app manifest for the ADR-052 fleet notification edge.
+#
+# Deploy (manual for now — auto-deploy tracked in project-ops#39):
+#   1. https://api.slack.com/apps → Create New App → From a manifest
+#   2. Pick the workspace, paste this file (YAML tab), review scopes, Create
+#   3. Install App to Workspace → copy the Bot User OAuth Token (xoxb-…)
+#   4. gh secret set SLACK_BOT_TOKEN -R WonderForgeLabs/.github
+#   5. Invite the bot to #agent-hitl / #agent-announcements / #agent-fleet
+#      (chat:write.public covers posting, but membership keeps it listable)
+#
+# Scopes map 1:1 to the Slack calls the fleet makes:
+#   chat:write + chat:write.public → chat.postMessage
+#     (.github/workflows/fleet-notify.yml, fleet.sh slack paths)
+#   channels:manage → conversations.create / setTopic / archive
+#     (fleet.sh per-session agent-<sid> channels)
+#   channels:history → conversations.history
+#     (fleet.sh reads human steer messages from the session channel)
+display_information:
+  name: WonderForge Fleet
+  description: ADR-052 agent-fleet notification edge — posts fleet events (HITL, announcements, session channels) to Slack
+  background_color: "#1a1f36"
+features:
+  bot_user:
+    display_name: wonderforge-fleet
+    always_online: true
+oauth_config:
+  scopes:
+    bot:
+      - chat:write
+      - chat:write.public
+      - channels:manage
+      - channels:history
+settings:
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false
